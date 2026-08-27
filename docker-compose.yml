@@ -1,0 +1,34 @@
+services:
+  camoufox:
+    build:
+      context: .
+      args:
+        # Which font sets to ship, and therefore which OSes the server may
+        # spoof: `all`, or a subset of linux,macos,windows. Linux only is
+        # ~740 MB; all three is ~1.7 GB. See README.
+        INCLUDE_FONTS: linux
+    image: ghcr.io/filipnyquist/camoudocker:latest
+    ports:
+      - "4444:4444"
+    # Firefox puts its IPC shared memory here; the 64 MB default is not enough.
+    shm_size: 2gb
+    environment:
+      CAMOUFOX_WS_PATH: camoufox
+      # CAMOUFOX_OS defaults to the font sets built in above; only widen it if
+      # you widened INCLUDE_FONTS to match.
+      # Match the fingerprint's locale and timezone to the exit IP. Costs one
+      # outbound lookup at startup when no proxy is set.
+      # CAMOUFOX_GEOIP: "true"
+      # CAMOUFOX_PROXY_SERVER: http://proxy.example.com:8080
+      # CAMOUFOX_PROXY_USERNAME: user
+      # CAMOUFOX_PROXY_PASSWORD: pass
+    restart: unless-stopped
+
+    # The image needs no writes outside these three paths, so the root
+    # filesystem can stay read-only. mode=1777 matters: without it the tmpfs
+    # comes up root-owned and the nonroot user cannot write to it.
+    read_only: true
+    tmpfs:
+      - /tmp:rw,exec,mode=1777,size=512m
+      - /home/nonroot:rw,mode=1777,size=64m
+      - /opt/cache/fontconfig:rw,mode=1777,size=64m

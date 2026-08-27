@@ -1,0 +1,105 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux fingerprints only, ~740 MB. Published as :latest.
+          - fonts: linux
+            suffix: ''
+          # Every bundled font set, ~1.7 GB, free OS rotation. Published as
+          # :latest-all.
+          - fonts: all
+            suffix: '-all'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The all-fonts build needs roughly 7 GB between the browser bundle, the
+      # builder stage and the final image.
+      - name: Free up runner disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+
+      - name: Log in to ${{ env.REGISTRY }}
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            suffix=${{ matrix.suffix }},onlatest=true
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=short
+
+      # Plain docker build: the Dockerfile needs no buildx features, and a
+      # buildx cache would not help much when most of the image is a 1.2 GB
+      # download that changes only when CAMOUFOX_VERSION does.
+      - name: Build
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          LABELS: ${{ steps.meta.outputs.labels }}
+        run: |
+          args=(--build-arg "INCLUDE_FONTS=${{ matrix.fonts }}" -t camoudocker:test)
+          while IFS= read -r tag; do
+            [ -n "$tag" ] && args+=(-t "$tag")
+          done <<< "$TAGS"
+          while IFS= read -r label; do
+            [ -n "$label" ] && args+=(--label "$label")
+          done <<< "$LABELS"
+          docker build "${args[@]}" .
+
+      - name: Smoke test
+        run: |
+          docker run -d --name camoufox --shm-size=2g -p 4444:4444 camoudocker:test
+          for _ in $(seq 60); do
+            docker logs camoufox 2>&1 | grep -q 'Websocket endpoint' && break
+            sleep 2
+          done
+          docker logs camoufox
+          docker logs camoufox 2>&1 | grep -q 'Websocket endpoint' || {
+            echo '::error::server never reported a websocket endpoint'
+            exit 1
+          }
+          # The client's Playwright has to match the one Camoufox pins.
+          pip install --quiet "playwright==$(docker run --rm --entrypoint /usr/bin/python3.11 \
+            camoudocker:test -c 'from playwright._repo_version import version; print(version)')"
+          python examples/client.py ws://127.0.0.1:4444/camoufox https://example.com
+          docker rm -f camoufox
+
+      - name: Push
+        if: github.event_name != 'pull_request'
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          while IFS= read -r tag; do
+            [ -n "$tag" ] && docker push "$tag"
+          done <<< "$TAGS"
